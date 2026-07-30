@@ -1,0 +1,47 @@
+StackSampler beta for macOS 11 or newer
+========================================
+
+The VST3 and standalone app are universal binaries for Apple Silicon and
+Intel Macs.
+
+VST3 installation
+-----------------
+
+1. Quit your audio host.
+2. Create this folder if it does not exist:
+
+   mkdir -p "$HOME/Library/Audio/Plug-Ins/VST3"
+
+3. Copy StackSampler.vst3 into that folder:
+
+   ditto "StackSampler.vst3" \
+     "$HOME/Library/Audio/Plug-Ins/VST3/StackSampler.vst3"
+
+4. This beta is ad-hoc signed and not notarized. Remove quarantine only from
+   the StackSampler bundle you downloaded from the project release:
+
+   xattr -dr com.apple.quarantine \
+     "$HOME/Library/Audio/Plug-Ins/VST3/StackSampler.vst3"
+
+5. Open your host and rescan VST3 plugins.
+
+Standalone app
+--------------
+
+Drag StackSampler.app into Applications. If macOS blocks the beta, remove
+quarantine only from this app and open it again:
+
+   xattr -dr com.apple.quarantine "/Applications/StackSampler.app"
+
+License
+-------
+
+StackSampler is distributed under AGPL-3.0. This open-source beta uses JUCE
+under its AGPLv3/commercial dual-license terms.
+
+The complete corresponding source for this v0.1.0 build is available at:
+
+   https://github.com/figtracer/stacksampler/tree/v0.1.0
+
+See LICENSE, THIRD_PARTY_NOTICES.md, and the Third-Party Licenses folder in
+this archive for the applicable licence texts and attribution.

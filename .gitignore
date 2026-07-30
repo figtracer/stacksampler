@@ -1,0 +1,12 @@
+.DS_Store
+.build/
+build/
+build-*/
+DerivedData/
+dist/
+
+CMakeUserPresets.json
+compile_commands.json
+
+*.xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
