@@ -59,6 +59,7 @@ public:
     bool addLayer();
     void removeLayer (int bank);
     bool loadSample (int bank, const juce::File& file, juce::String* errorMessage = nullptr);
+    void loadSampleAsync (int bank, const juce::File& file);
     void applyQuickMode (int bank, stacksampler::QuickMode mode);
     void randomizeLayer (int bank);
 
@@ -68,6 +69,8 @@ public:
     juce::AudioProcessorValueTreeState parameters;
 
 private:
+    struct AsyncLoadContext;
+
     struct LayerMetadata
     {
         std::atomic<bool> active { false };
@@ -110,6 +113,14 @@ private:
     std::atomic<juce::int64> humanizeSeed { 0x535441434b };
     std::atomic<std::uint64_t> humanizeSeedGeneration { 1 };
     std::uint64_t appliedHumanizeSeedGeneration = 0;
+    std::array<std::atomic<std::uint64_t>, stacksampler::kMaxLayers>
+        sampleLoadGenerations {};
+    std::shared_ptr<AsyncLoadContext> asyncLoadContext;
+    juce::ThreadPool sampleLoadingPool {
+        juce::ThreadPool::Options {}
+            .withNumberOfThreads (1)
+            .withThreadName ("StackSampler sample loader")
+    };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (StackSamplerAudioProcessor)
 };

@@ -13,7 +13,10 @@ namespace
 {
 constexpr double rootMidiNote = 60.0;
 constexpr float smoothingTimeSeconds = 0.015f;
+constexpr float audibilitySmoothingTimeSeconds = 0.005f;
 constexpr int antiClickFadeSamples = 32;
+constexpr float highPassBypassBoundaryHz = 20.01f;
+constexpr float lowPassBypassBoundaryHz = 19999.0f;
 
 int millisecondsToSamples (float milliseconds, double sampleRate) noexcept
 {
@@ -28,6 +31,15 @@ int millisecondsToSamples (float milliseconds, double sampleRate) noexcept
 float bipolarRandom (juce::Random& random) noexcept
 {
     return random.nextFloat() * 2.0f - 1.0f;
+}
+
+float onePoleCoefficient (float cutoff, double sampleRate) noexcept
+{
+    const auto maximumCutoff = static_cast<float> (sampleRate * 0.49);
+    const auto limitedCutoff = juce::jlimit (1.0f, maximumCutoff, cutoff);
+    return 1.0f
+         - std::exp (static_cast<float> (-juce::MathConstants<double>::twoPi
+                                         * limitedCutoff / sampleRate));
 }
 }
 
@@ -59,7 +71,14 @@ void LayerEngine::prepare (double sampleRate, int maximumExpectedSamplesPerBlock
     initialise (width, 1.0f);
     initialise (drive, 0.0f);
     initialise (saturation, 0.0f);
+    initialise (highPassCoefficient, 1.0f);
+    initialise (lowPassCoefficient, 1.0f);
+    initialise (highPassMix, 0.0f);
+    initialise (lowPassMix, 0.0f);
+    audibility.reset (outputSampleRate, audibilitySmoothingTimeSeconds);
+    audibility.setCurrentAndTargetValue (1.0f);
     parameterTargetsInitialised = false;
+    audibilityTargetInitialised = false;
 }
 
 void LayerEngine::reset()
@@ -77,6 +96,7 @@ void LayerEngine::releaseResources() noexcept
     consumedSampleGeneration.store (appliedSampleGeneration,
                                     std::memory_order_release);
     parameterTargetsInitialised = false;
+    audibilityTargetInitialised = false;
 }
 
 void LayerEngine::setSample (std::shared_ptr<const SampleData> newSample)
@@ -138,6 +158,7 @@ void LayerEngine::consumeControlRequests()
     appliedResetGeneration = nextResetGeneration;
     clearVoices();
     clearFilterState();
+    audibilityTargetInitialised = false;
 
     if (nextSampleGeneration != consumedSampleGeneration.load (
             std::memory_order_relaxed))
@@ -167,47 +188,49 @@ void LayerEngine::updateTargets (const LayerRenderParameters& parameters) noexce
     saturation.setTargetValue (juce::jlimit (0.0f, 1.0f, parameters.saturation));
 }
 
+void LayerEngine::updateFilterTargets (
+    const LayerRenderParameters& parameters) noexcept
+{
+    highPassCoefficient.setTargetValue (
+        onePoleCoefficient (parameters.highPassHz, outputSampleRate));
+    lowPassCoefficient.setTargetValue (
+        onePoleCoefficient (parameters.lowPassHz, outputSampleRate));
+    highPassMix.setTargetValue (
+        parameters.highPassHz > highPassBypassBoundaryHz ? 1.0f : 0.0f);
+    lowPassMix.setTargetValue (
+        parameters.lowPassHz < lowPassBypassBoundaryHz ? 1.0f : 0.0f);
+}
+
 void LayerEngine::beginBlock (const LayerRenderParameters& parameters)
 {
     consumeControlRequests();
 
     if (! parameterTargetsInitialised)
     {
-        gain.setCurrentAndTargetValue (
-            juce::Decibels::decibelsToGain (parameters.gainDb));
-        volume.setCurrentAndTargetValue (
-            juce::Decibels::decibelsToGain (parameters.volumeDb));
-        pan.setCurrentAndTargetValue (juce::jlimit (-1.0f, 1.0f, parameters.pan));
-        width.setCurrentAndTargetValue (
-            juce::jlimit (0.0f, 2.0f, parameters.stereoWidth));
-        drive.setCurrentAndTargetValue (
-            juce::jlimit (0.0f, 24.0f, parameters.driveDb));
-        saturation.setCurrentAndTargetValue (
-            juce::jlimit (0.0f, 1.0f, parameters.saturation));
+        updateTargets (parameters);
+        updateFilterTargets (parameters);
+        const auto snapToTarget = [] (auto& value)
+        {
+            value.setCurrentAndTargetValue (value.getTargetValue());
+        };
+
+        snapToTarget (gain);
+        snapToTarget (volume);
+        snapToTarget (pan);
+        snapToTarget (width);
+        snapToTarget (drive);
+        snapToTarget (saturation);
+        snapToTarget (highPassCoefficient);
+        snapToTarget (lowPassCoefficient);
+        snapToTarget (highPassMix);
+        snapToTarget (lowPassMix);
         parameterTargetsInitialised = true;
     }
     else
     {
         updateTargets (parameters);
+        updateFilterTargets (parameters);
     }
-
-    highPassEnabled = parameters.highPassHz > 20.01f;
-    lowPassEnabled = parameters.lowPassHz < 19999.0f;
-
-    const auto maximumCutoff = static_cast<float> (outputSampleRate * 0.49);
-    const auto highPassCutoff
-        = juce::jlimit (1.0f, maximumCutoff, parameters.highPassHz);
-    const auto lowPassCutoff
-        = juce::jlimit (1.0f, maximumCutoff, parameters.lowPassHz);
-    const auto coefficient = [this] (float cutoff)
-    {
-        return 1.0f
-             - std::exp (static_cast<float> (-juce::MathConstants<double>::twoPi
-                                             * cutoff / outputSampleRate));
-    };
-
-    highPassCoefficient = coefficient (highPassCutoff);
-    lowPassCoefficient = coefficient (lowPassCutoff);
 }
 
 void LayerEngine::trigger (int midiNote,
@@ -511,6 +534,17 @@ void LayerEngine::renderChunk (juce::AudioBuffer<float>& destination,
                                int numSamples,
                                const LayerRenderParameters& parameters)
 {
+    const auto audibilityTarget = parameters.mute ? 0.0f : 1.0f;
+    if (! audibilityTargetInitialised)
+    {
+        audibility.setCurrentAndTargetValue (audibilityTarget);
+        audibilityTargetInitialised = true;
+    }
+    else
+    {
+        audibility.setTargetValue (audibilityTarget);
+    }
+
     scratch.clear (0, numSamples);
 
     for (auto& voice : voices)
@@ -526,21 +560,22 @@ void LayerEngine::renderChunk (juce::AudioBuffer<float>& destination,
         left *= inputGain;
         right *= inputGain;
 
-        if (highPassEnabled)
-        {
-            highPassState[0] += highPassCoefficient * (left - highPassState[0]);
-            highPassState[1] += highPassCoefficient * (right - highPassState[1]);
-            left -= highPassState[0];
-            right -= highPassState[1];
-        }
+        const auto highPassAmount = highPassMix.getNextValue();
+        const auto highPassCurrentCoefficient
+            = highPassCoefficient.getNextValue();
+        highPassState[0] += highPassCurrentCoefficient
+                          * (left - highPassState[0]);
+        highPassState[1] += highPassCurrentCoefficient
+                          * (right - highPassState[1]);
+        left -= highPassState[0] * highPassAmount;
+        right -= highPassState[1] * highPassAmount;
 
-        if (lowPassEnabled)
-        {
-            lowPassState[0] += lowPassCoefficient * (left - lowPassState[0]);
-            lowPassState[1] += lowPassCoefficient * (right - lowPassState[1]);
-            left = lowPassState[0];
-            right = lowPassState[1];
-        }
+        const auto lowPassAmount = lowPassMix.getNextValue();
+        const auto lowPassCurrentCoefficient = lowPassCoefficient.getNextValue();
+        lowPassState[0] += lowPassCurrentCoefficient * (left - lowPassState[0]);
+        lowPassState[1] += lowPassCurrentCoefficient * (right - lowPassState[1]);
+        left += (lowPassState[0] - left) * lowPassAmount;
+        right += (lowPassState[1] - right) * lowPassAmount;
 
         const auto driveDb = drive.getNextValue();
         const auto saturationAmount = saturation.getNextValue();
@@ -572,11 +607,9 @@ void LayerEngine::renderChunk (juce::AudioBuffer<float>& destination,
         float panRight = 1.0f;
         panGains (pan.getNextValue(), panLeft, panRight);
         const auto outputGain = volume.getNextValue();
-        left *= panLeft * outputGain;
-        right *= panRight * outputGain;
-
-        if (parameters.mute)
-            continue;
+        const auto audibilityGain = audibility.getNextValue();
+        left *= panLeft * outputGain * audibilityGain;
+        right *= panRight * outputGain * audibilityGain;
 
         if (destination.getNumChannels() == 1)
         {

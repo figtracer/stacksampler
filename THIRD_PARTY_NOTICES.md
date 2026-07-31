@@ -1,9 +1,9 @@
 # Third-party notices
 
-StackSampler v0.1.0 is distributed under the GNU Affero General Public
+StackSampler v0.2.0 is distributed under the GNU Affero General Public
 License v3.0. Its complete corresponding source is available at:
 
-https://github.com/figtracer/stacksampler/tree/v0.1.0
+https://github.com/figtracer/stacksampler/tree/v0.2.0
 
 ## JUCE
 
@@ -14,7 +14,7 @@ https://github.com/juce-framework/JUCE/tree/8.0.15
 Copyright © Raw Material Software Limited.
 
 JUCE framework modules are dual-licensed under AGPLv3 and the commercial JUCE
-licence. StackSampler v0.1.0 uses them under AGPLv3.
+licence. StackSampler v0.2.0 uses them under AGPLv3.
 
 ## Bundled dependencies
 

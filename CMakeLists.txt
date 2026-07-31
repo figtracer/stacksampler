@@ -7,7 +7,7 @@ if(APPLE)
         "oldest supported macOS version")
 endif()
 
-project(StackSampler VERSION 0.1.0 LANGUAGES C CXX)
+project(StackSampler VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -35,7 +35,7 @@ juce_add_plugin(StackSampler
     PLUGIN_MANUFACTURER_CODE Figt
     PLUGIN_CODE StSm
     PRODUCT_NAME "StackSampler"
-    DESCRIPTION "minimal vst3 sample layering tool"
+    DESCRIPTION "fast creative sample layering instrument"
     FORMATS VST3 Standalone
     VST3_CATEGORIES Instrument Sampler
     IS_SYNTH TRUE
@@ -56,6 +56,7 @@ target_sources(StackSampler
         Source/PluginEditor.h
         Source/PluginProcessor.cpp
         Source/PluginProcessor.h
+        Source/PluginUiModel.h
         Source/StackSamplerCore.cpp
         Source/StackSamplerCore.h
 )
@@ -97,6 +98,7 @@ if(BUILD_TESTING)
             Source/PluginEditor.h
             Source/PluginProcessor.cpp
             Source/PluginProcessor.h
+            Source/PluginUiModel.h
             Source/StackSamplerCore.cpp
             Source/StackSamplerCore.h
             Tests/StackSamplerTests.cpp
@@ -110,6 +112,7 @@ if(BUILD_TESTING)
     target_compile_definitions(StackSamplerTests
         PRIVATE
             JUCE_UNIT_TESTS=1
+            JUCE_MODAL_LOOPS_PERMITTED=1
             JUCE_USE_CURL=0
             JUCE_VST3_CAN_REPLACE_VST2=0
             JUCE_WEB_BROWSER=0

@@ -1,16 +1,32 @@
 # stacksampler
 
-minimal vst3 sample layering tool.
+fast, focused vst3 sample layering instrument.
+
+drag, drop, shape, done.
 
 ## what it does
 
 - opens with three sample layers ready to use
 - accepts wav, aiff, and flac files by drag and drop
 - grows to 32 layers without opening more sampler instances
-- gives every layer its own waveform, mute, solo, remove, and sound controls
+- keeps every layer visible in a compact rack with clear mute, solo, and remove actions
+- edits the selected layer in one focused panel with no secondary windows or hidden menus
+- includes a large reversible waveform with direct in and out trim handles
 - includes clap, snare, hi-hat, perc, texture, vocal, and 808 quick modes
 - adds subtle random and humanized variation for faster natural stacks
+- smooths mute, solo, and filter changes to avoid clicks during sound design
 - runs as a vst3 instrument or standalone app
+
+## workflow
+
+drop a sound on any layer card, select it, then shape it in three clear groups:
+
+- level and tune: input, level, pan, pitch, and fine tune
+- envelope and shape: attack, decay, release, transient, and tail
+- tone and space: high-pass, low-pass, drive, saturation, and width
+
+start and end live directly on the waveform. reverse mirrors the waveform and
+its selected region, so the display always matches playback direction.
 
 ## audio notes
 
@@ -55,6 +71,6 @@ AGPL-3.0. This open-source beta uses JUCE under its AGPLv3/commercial
 dual-license terms. A proprietary distribution requires an appropriate JUCE
 commercial license.
 
-The complete corresponding source for v0.1.0 is available at
-https://github.com/figtracer/stacksampler/tree/v0.1.0. Third-party attribution
+The complete corresponding source for v0.2.0 is available at
+https://github.com/figtracer/stacksampler/tree/v0.2.0. Third-party attribution
 and licence details are in `THIRD_PARTY_NOTICES.md`.
