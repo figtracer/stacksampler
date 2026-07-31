@@ -39,9 +39,9 @@ License
 StackSampler is distributed under AGPL-3.0. This open-source beta uses JUCE
 under its AGPLv3/commercial dual-license terms.
 
-The complete corresponding source for this v0.1.0 build is available at:
+The complete corresponding source for this v0.2.0 build is available at:
 
-   https://github.com/figtracer/stacksampler/tree/v0.1.0
+   https://github.com/figtracer/stacksampler/tree/v0.2.0
 
 See LICENSE, THIRD_PARTY_NOTICES.md, and the Third-Party Licenses folder in
 this archive for the applicable licence texts and attribution.

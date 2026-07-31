@@ -100,6 +100,7 @@ private:
     void clearVoices() noexcept;
     void clearFilterState() noexcept;
     void updateTargets (const LayerRenderParameters& parameters) noexcept;
+    void updateFilterTargets (const LayerRenderParameters& parameters) noexcept;
     void renderChunk (juce::AudioBuffer<float>& destination,
                       int startSample,
                       int numSamples,
@@ -136,10 +137,12 @@ private:
 
     std::array<float, 2> highPassState {};
     std::array<float, 2> lowPassState {};
-    float highPassCoefficient = 1.0f;
-    float lowPassCoefficient = 1.0f;
-    bool highPassEnabled = false;
-    bool lowPassEnabled = false;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        highPassCoefficient;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        lowPassCoefficient;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> highPassMix;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> lowPassMix;
 
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> gain;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> volume;
@@ -147,7 +150,9 @@ private:
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> width;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> drive;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> saturation;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> audibility;
     bool parameterTargetsInitialised = false;
+    bool audibilityTargetInitialised = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (LayerEngine)
 };

@@ -7,7 +7,7 @@
 
 namespace
 {
-constexpr int waveformBinCount = 320;
+constexpr int waveformBinCount = 1024;
 constexpr double maximumTailSeconds = 33.0;
 
 constexpr std::array<const char*, 20> layerParameterSuffixes
@@ -40,7 +40,118 @@ bool hasSupportedExtension (const juce::File& file)
     return extension == ".wav" || extension == ".aif" || extension == ".aiff"
         || extension == ".flac";
 }
+
+struct DecodedSample
+{
+    std::shared_ptr<stacksampler::SampleData> sample;
+    double sampleRate = 0.0;
+    int channelCount = 0;
+    juce::String error;
+    bool cancelled = false;
+};
+
+DecodedSample decodeSample (juce::AudioFormatManager& manager,
+                            const juce::File& file,
+                            const std::function<bool()>& shouldCancel = {})
+{
+    DecodedSample result;
+    std::unique_ptr<juce::AudioFormatReader> reader (manager.createReaderFor (file));
+    if (reader == nullptr)
+    {
+        result.error = "Could not decode this audio file";
+        return result;
+    }
+
+    if (reader->lengthInSamples <= 0
+        || reader->lengthInSamples > std::numeric_limits<int>::max())
+    {
+        result.error = "Sample is empty or too long";
+        return result;
+    }
+
+    if (shouldCancel && shouldCancel())
+    {
+        result.cancelled = true;
+        return result;
+    }
+
+    result.sample = std::make_shared<stacksampler::SampleData>();
+    result.channelCount = juce::jlimit (1, 2, static_cast<int> (reader->numChannels));
+    const auto sampleCount = static_cast<int> (reader->lengthInSamples);
+    result.sample->audio.setSize (result.channelCount, sampleCount);
+    result.sample->sampleRate = reader->sampleRate;
+    result.sampleRate = reader->sampleRate;
+
+    constexpr int decodeChunkSize = 65536;
+    for (int firstSample = 0; firstSample < sampleCount;)
+    {
+        if (shouldCancel && shouldCancel())
+        {
+            result.sample.reset();
+            result.cancelled = true;
+            return result;
+        }
+
+        const auto samplesToRead = juce::jmin (decodeChunkSize,
+                                               sampleCount - firstSample);
+        if (! reader->read (&result.sample->audio,
+                            firstSample,
+                            samplesToRead,
+                            firstSample,
+                            true,
+                            result.channelCount > 1))
+        {
+            result.sample.reset();
+            result.error = "Could not read this audio file";
+            return result;
+        }
+
+        firstSample += samplesToRead;
+    }
+
+    const auto bins = juce::jmin (waveformBinCount, sampleCount);
+    result.sample->waveformMin.resize (static_cast<std::size_t> (bins));
+    result.sample->waveformMax.resize (static_cast<std::size_t> (bins));
+
+    for (int bin = 0; bin < bins; ++bin)
+    {
+        if (shouldCancel && shouldCancel())
+        {
+            result.sample.reset();
+            result.cancelled = true;
+            return result;
+        }
+
+        const auto firstSample = static_cast<int> (
+            static_cast<juce::int64> (bin) * sampleCount / bins);
+        const auto lastSample = juce::jmax (
+            firstSample + 1,
+            static_cast<int> (
+                static_cast<juce::int64> (bin + 1) * sampleCount / bins));
+        auto minimum = 1.0f;
+        auto maximum = -1.0f;
+
+        for (int channel = 0; channel < result.channelCount; ++channel)
+        {
+            const auto range = result.sample->audio.findMinMax (
+                channel, firstSample, lastSample - firstSample);
+            minimum = juce::jmin (minimum, range.getStart());
+            maximum = juce::jmax (maximum, range.getEnd());
+        }
+
+        result.sample->waveformMin[static_cast<std::size_t> (bin)] = minimum;
+        result.sample->waveformMax[static_cast<std::size_t> (bin)] = maximum;
+    }
+
+    return result;
 }
+}
+
+struct StackSamplerAudioProcessor::AsyncLoadContext
+{
+    juce::CriticalSection lock;
+    StackSamplerAudioProcessor* processor = nullptr;
+};
 
 StackSamplerAudioProcessor::StackSamplerAudioProcessor()
     : AudioProcessor (BusesProperties().withOutput ("Output",
@@ -51,6 +162,8 @@ StackSamplerAudioProcessor::StackSamplerAudioProcessor()
                   juce::Identifier { "STACKSAMPLER_PARAMETERS" },
                   stacksampler::createParameterLayout())
 {
+    asyncLoadContext = std::make_shared<AsyncLoadContext>();
+    asyncLoadContext->processor = this;
     formatManager.registerBasicFormats();
 
     for (int bank = 0; bank < stacksampler::kMaxLayers; ++bank)
@@ -67,6 +180,14 @@ StackSamplerAudioProcessor::StackSamplerAudioProcessor()
 StackSamplerAudioProcessor::~StackSamplerAudioProcessor()
 {
     stopTimer();
+
+    {
+        const juce::ScopedLock lock (asyncLoadContext->lock);
+        asyncLoadContext->processor = nullptr;
+    }
+
+    sampleLoadingPool.removeAllJobs (true, 10000);
+    asyncLoadContext.reset();
 
     for (auto& engine : layerEngines)
         engine.collectRetiredSamples();
@@ -319,6 +440,7 @@ StackSamplerAudioProcessor::getSampleData (int bank) const
 
 bool StackSamplerAudioProcessor::addLayer()
 {
+    const juce::ScopedLock mutationLock (asyncLoadContext->lock);
     auto freeBank = -1;
 
     for (int bank = 0; bank < stacksampler::kMaxLayers; ++bank)
@@ -359,7 +481,9 @@ void StackSamplerAudioProcessor::removeLayer (int bank)
     if (! juce::isPositiveAndBelow (bank, stacksampler::kMaxLayers))
         return;
 
+    const juce::ScopedLock mutationLock (asyncLoadContext->lock);
     const auto index = static_cast<std::size_t> (bank);
+    sampleLoadGenerations[index].fetch_add (1, std::memory_order_release);
     layerMetadata[index].active.store (false, std::memory_order_release);
     layerEngines[index].setSample ({});
     layerEngines[index].reset();
@@ -383,6 +507,7 @@ bool StackSamplerAudioProcessor::loadSample (int bank,
                                              const juce::File& file,
                                              juce::String* errorMessage)
 {
+    const juce::ScopedLock mutationLock (asyncLoadContext->lock);
     const auto fail = [&] (const juce::String& message)
     {
         if (errorMessage != nullptr)
@@ -403,73 +528,29 @@ bool StackSamplerAudioProcessor::loadSample (int bank,
             std::memory_order_acquire))
         return fail ("Layer is not active");
 
+    sampleLoadGenerations[static_cast<std::size_t> (bank)].fetch_add (
+        1, std::memory_order_release);
+
     if (! file.existsAsFile())
         return fail ("Sample file is missing");
 
     if (! hasSupportedExtension (file))
         return fail ("Use WAV, AIFF or FLAC");
 
-    std::unique_ptr<juce::AudioFormatReader> reader (formatManager.createReaderFor (file));
+    auto decoded = decodeSample (formatManager, file);
+    if (decoded.sample == nullptr)
+        return fail (decoded.error);
 
-    if (reader == nullptr)
-        return fail ("Could not decode this audio file");
-
-    if (reader->lengthInSamples <= 0
-        || reader->lengthInSamples > std::numeric_limits<int>::max())
-        return fail ("Sample is empty or too long");
-
-    auto sample = std::make_shared<stacksampler::SampleData>();
-    const auto channelCount = juce::jlimit (1, 2, static_cast<int> (reader->numChannels));
-    const auto sampleCount = static_cast<int> (reader->lengthInSamples);
-    sample->audio.setSize (channelCount, sampleCount);
-    sample->sampleRate = reader->sampleRate;
-
-    if (! reader->read (&sample->audio,
-                        0,
-                        sampleCount,
-                        0,
-                        true,
-                        channelCount > 1))
-        return fail ("Could not read this audio file");
-
-    const auto bins = juce::jmin (waveformBinCount, sampleCount);
-    sample->waveformMin.resize (static_cast<std::size_t> (bins));
-    sample->waveformMax.resize (static_cast<std::size_t> (bins));
-
-    for (int bin = 0; bin < bins; ++bin)
-    {
-        const auto firstSample = static_cast<int> (
-            static_cast<juce::int64> (bin) * sampleCount / bins);
-        const auto lastSample = juce::jmax (firstSample + 1,
-                                           static_cast<int> (
-                                               static_cast<juce::int64> (bin + 1)
-                                               * sampleCount / bins));
-        auto minimum = 1.0f;
-        auto maximum = -1.0f;
-
-        for (int channel = 0; channel < channelCount; ++channel)
-        {
-            const auto range = sample->audio.findMinMax (channel,
-                                                        firstSample,
-                                                        lastSample - firstSample);
-            minimum = juce::jmin (minimum, range.getStart());
-            maximum = juce::jmax (maximum, range.getEnd());
-        }
-
-        sample->waveformMin[static_cast<std::size_t> (bin)] = minimum;
-        sample->waveformMax[static_cast<std::size_t> (bin)] = maximum;
-    }
-
-    layerEngines[static_cast<std::size_t> (bank)].setSample (sample);
+    layerEngines[static_cast<std::size_t> (bank)].setSample (decoded.sample);
 
     {
         const juce::ScopedLock lock (metadataLock);
         auto& metadata = layerMetadata[static_cast<std::size_t> (bank)];
         metadata.name = file.getFileNameWithoutExtension();
         metadata.filePath = file.getFullPathName();
-        metadata.status = juce::String (reader->sampleRate / 1000.0, 1)
-                        + " kHz · "
-                        + juce::String (channelCount == 1 ? "mono" : "stereo");
+        metadata.status = juce::String (decoded.sampleRate / 1000.0, 1)
+                        + " kHz | "
+                        + juce::String (decoded.channelCount == 1 ? "mono" : "stereo");
     }
 
     if (errorMessage != nullptr)
@@ -477,6 +558,120 @@ bool StackSamplerAudioProcessor::loadSample (int bank,
 
     sendChangeMessage();
     return true;
+}
+
+void StackSamplerAudioProcessor::loadSampleAsync (int bank, const juce::File& file)
+{
+    const juce::ScopedLock mutationLock (asyncLoadContext->lock);
+    const auto setStatus = [this, bank] (const juce::String& status)
+    {
+        if (juce::isPositiveAndBelow (bank, stacksampler::kMaxLayers))
+        {
+            const juce::ScopedLock lock (metadataLock);
+            layerMetadata[static_cast<std::size_t> (bank)].status = status;
+        }
+        sendChangeMessage();
+    };
+
+    if (! juce::isPositiveAndBelow (bank, stacksampler::kMaxLayers)
+        || ! layerMetadata[static_cast<std::size_t> (bank)].active.load (
+            std::memory_order_acquire))
+    {
+        setStatus ("Layer is not active");
+        return;
+    }
+
+    const auto index = static_cast<std::size_t> (bank);
+    const auto generation = sampleLoadGenerations[index].fetch_add (
+                                1, std::memory_order_acq_rel)
+                          + 1;
+
+    if (! file.existsAsFile())
+    {
+        setStatus ("Sample file is missing");
+        return;
+    }
+
+    if (! hasSupportedExtension (file))
+    {
+        setStatus ("Use WAV, AIFF or FLAC");
+        return;
+    }
+
+    const auto loadContext = asyncLoadContext;
+    setStatus ("Loading sample...");
+
+    sampleLoadingPool.addJob ([loadContext, bank, file, generation]
+    {
+        juce::AudioFormatManager backgroundFormats;
+        backgroundFormats.registerBasicFormats();
+        const auto shouldCancel = [loadContext, bank, generation]
+        {
+            if (const auto* job = juce::ThreadPoolJob::getCurrentThreadPoolJob();
+                job != nullptr && job->shouldExit())
+                return true;
+
+            const juce::ScopedLock lifetimeLock (loadContext->lock);
+            const auto* processor = loadContext->processor;
+            if (processor == nullptr)
+                return true;
+
+            const auto layerIndex = static_cast<std::size_t> (bank);
+            return processor->sampleLoadGenerations[layerIndex].load (
+                       std::memory_order_acquire)
+                       != generation
+                || ! processor->layerMetadata[layerIndex].active.load (
+                    std::memory_order_acquire);
+        };
+        auto backgroundResult = decodeSample (backgroundFormats, file, shouldCancel);
+        if (backgroundResult.cancelled)
+            return;
+
+        juce::MessageManager::callAsync (
+            [loadContext,
+             bank,
+             file,
+             generation,
+            decoded = std::move (backgroundResult)] () mutable
+            {
+                const juce::ScopedLock lifetimeLock (loadContext->lock);
+                auto* processor = loadContext->processor;
+                if (processor == nullptr)
+                    return;
+
+                const auto layerIndex = static_cast<std::size_t> (bank);
+                if (processor->sampleLoadGenerations[layerIndex].load (
+                        std::memory_order_acquire)
+                        != generation
+                    || ! processor->layerMetadata[layerIndex].active.load (
+                        std::memory_order_acquire))
+                    return;
+
+                if (decoded.sample == nullptr)
+                {
+                    {
+                        const juce::ScopedLock lock (processor->metadataLock);
+                        processor->layerMetadata[layerIndex].status = decoded.error;
+                    }
+                    processor->sendChangeMessage();
+                    return;
+                }
+
+                processor->layerEngines[layerIndex].setSample (decoded.sample);
+                {
+                    const juce::ScopedLock lock (processor->metadataLock);
+                    auto& metadata = processor->layerMetadata[layerIndex];
+                    metadata.name = file.getFileNameWithoutExtension();
+                    metadata.filePath = file.getFullPathName();
+                    metadata.status = juce::String (decoded.sampleRate / 1000.0, 1)
+                                    + " kHz | "
+                                    + juce::String (decoded.channelCount == 1
+                                                        ? "mono"
+                                                        : "stereo");
+                }
+                processor->sendChangeMessage();
+            });
+    });
 }
 
 void StackSamplerAudioProcessor::setParameterValue (const juce::String& parameterId,
@@ -626,6 +821,7 @@ void StackSamplerAudioProcessor::setHumanizeEnabled (bool enabled)
 
 void StackSamplerAudioProcessor::resetToInitialLayers()
 {
+    const juce::ScopedLock mutationLock (asyncLoadContext->lock);
     {
         const juce::ScopedLock lock (metadataLock);
         layerOrder.clear();
@@ -633,6 +829,7 @@ void StackSamplerAudioProcessor::resetToInitialLayers()
         for (int bank = 0; bank < stacksampler::kMaxLayers; ++bank)
         {
             const auto index = static_cast<std::size_t> (bank);
+            sampleLoadGenerations[index].fetch_add (1, std::memory_order_release);
             layerMetadata[index].active.store (false, std::memory_order_release);
             layerMetadata[index].name.clear();
             layerMetadata[index].filePath.clear();
@@ -695,6 +892,7 @@ void StackSamplerAudioProcessor::setStateInformation (const void* data, int size
     if (! state.isValid())
         return;
 
+    const juce::ScopedLock mutationLock (asyncLoadContext->lock);
     parameters.replaceState (state);
     const auto restoredHumanizeSeed = static_cast<juce::int64> (
         state.getProperty ("humanizeSeed",
@@ -760,6 +958,7 @@ void StackSamplerAudioProcessor::setStateInformation (const void* data, int size
         for (int bank = 0; bank < stacksampler::kMaxLayers; ++bank)
         {
             const auto index = static_cast<std::size_t> (bank);
+            sampleLoadGenerations[index].fetch_add (1, std::memory_order_release);
             layerMetadata[index].active.store (false, std::memory_order_release);
             layerMetadata[index].name.clear();
             layerMetadata[index].filePath.clear();
